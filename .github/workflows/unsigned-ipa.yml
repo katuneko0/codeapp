@@ -1,0 +1,91 @@
+name: Build unsigned Code App IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          if [ -d /Applications/Xcode_26.2.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+          fi
+          xcodebuild -version
+
+      - name: Download Code App frameworks
+        run: |
+          chmod +x ./downloadFrameworks.sh
+          ./downloadFrameworks.sh
+
+      - name: Create placeholder secrets
+        run: |
+          mkdir -p CodeApp/Constants
+          cat > CodeApp/Constants/Secrets.swift <<'EOF'
+          let JUDGE0_ENDPOINT = ""
+          let JUDGE0_KEY = ""
+          EOF
+
+      - name: Build unsigned iOS archive
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "Code.xcodeproj" \
+            -scheme "Code App" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/CodeApp.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            archive 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | tail -n 100
+
+      - name: Package unsigned IPA
+        run: |
+          echo "Archive contents:"
+          find "$RUNNER_TEMP/CodeApp.xcarchive/Products" -maxdepth 3 -print
+          APP=""
+          for candidate in "$RUNNER_TEMP/CodeApp.xcarchive/Products/Applications/"*.app; do
+            if [ -d "$candidate" ]; then
+              APP="$candidate"
+              break
+            fi
+          done
+          if [ -z "$APP" ]; then
+            echo "No .app bundle found in archive"
+            exit 1
+          fi
+          echo "Packaging app bundle: $APP"
+          ls -la "$APP"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/CodeApp-unsigned.ipa" Payload
+          ls -lh "$GITHUB_WORKSPACE/CodeApp-unsigned.ipa"
+          /usr/bin/unzip -l "$GITHUB_WORKSPACE/CodeApp-unsigned.ipa" | head -n 30
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodeApp-unsigned-IPA
+          path: CodeApp-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
